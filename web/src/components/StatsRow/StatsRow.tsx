@@ -1,23 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { BlockEvent, Meta } from "@/lib/types";
+import type { Meta, SymbolBook } from "@/lib/types";
 import { fmtInt, uptime } from "@/lib/format";
 import styles from "./StatsRow.module.css";
 
 const DASH = "-";
 
 export default function StatsRow({
-  latest,
-  avgLatencyMs,
   meta,
+  books,
 }: {
-  latest: BlockEvent | null;
-  avgLatencyMs: number;
   meta: Meta | null;
+  books: Record<string, SymbolBook>;
 }) {
   const startedAt = meta?.startedAt ?? null;
-  // Ticks once a second; starts on the client so SSR and hydration agree.
   const [up, setUp] = useState<string | null>(null);
 
   useEffect(() => {
@@ -31,18 +28,30 @@ export default function StatsRow({
     return () => clearInterval(id);
   }, [startedAt]);
 
-  const decision = latest?.decision ?? null;
-  const last = decision && !decision.late ? `${decision.latencyMs} ms` : `${DASH} ms`;
-  const avg =
-    Number.isFinite(avgLatencyMs) && avgLatencyMs > 0 ? `${Math.round(avgLatencyMs)}ms` : DASH;
-  const totals = latest?.totals ?? null;
+  let decisions = 0;
+  let fills = 0;
+  let latSum = 0;
+  let latN = 0;
+  for (const book of Object.values(books)) {
+    const t = book.latest?.totals;
+    if (t) {
+      decisions += t.decisions;
+      fills += t.fills;
+    }
+    if (book.avgLatencyMs > 0) {
+      latSum += book.avgLatencyMs;
+      latN++;
+    }
+  }
+  const avg = latN > 0 ? `${Math.round(latSum / latN)}ms` : DASH;
+  const fee = meta ? `${(meta.fees.maker * 100).toFixed(3)}% maker` : DASH;
 
   return (
     <div className={styles.stats}>
-      <span>last {last}</span>
       <span>avg {avg}</span>
-      <span className={styles.nowrap}>{totals ? fmtInt(totals.decisions) : DASH} calls</span>
-      <span className={styles.nowrap}>{totals ? fmtInt(totals.fills) : DASH} fills</span>
+      <span className={styles.nowrap}>{decisions ? fmtInt(decisions) : DASH} calls</span>
+      <span className={styles.nowrap}>{fills ? fmtInt(fills) : DASH} fills</span>
+      <span>{fee}</span>
       <span className={styles.spacer} />
       <span>uptime {up ?? "00:00:00"}</span>
     </div>

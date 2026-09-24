@@ -112,14 +112,14 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## The core message (do not break this)
 
-The demo exists to support this tweet. Every design or strategy change must keep all four claims true:
+This fork trades on Bybit. Every design or strategy change must keep these claims true:
 
 > I built a trading bot with Jev!
 >
 > Jev decides if it should "buy" or "sell", given the price feed of an asset pair, and executes real trades.
 >
-> It uses Monad to place the orders on Kuru's on-chain order book in every 300ms block.
+> It places one post-only order on Bybit about every 300 ms, on SOLUSDT and XRPUSDT.
 >
-> Demo link: https://jev-trader.vercel.app
+> The demo is the live dashboard.
 
-Non-negotiables: Jev makes the buy/sell call (not code), from the price feed; real trades from a real wallet; an order placed on Kuru's on-chain book every 300 ms block; the demo is the live dashboard. Never decide every N blocks. No middle dots, em dashes or en dashes in any rendered text. No blinking or pulsing indicators.
+Non-negotiables: Jev makes the buy/sell call (not code), from the price feed; real trades from a real Bybit account when DRY_RUN is false and keys are set; an order on each book every loop (default 300 ms). Never decide every N ticks. Dry run is the default. No middle dots, em dashes or en dashes in any rendered text. No blinking or pulsing indicators.

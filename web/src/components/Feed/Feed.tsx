@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { BlockEvent } from "@/lib/types";
-import { fmtInt, fmtPrice, shortTx, txUrl } from "@/lib/format";
+import type { TickEvent } from "@/lib/types";
+import { fmtInt, fmtPrice, shortId, tradeUrl } from "@/lib/format";
 import styles from "./Feed.module.css";
 
 /** Must match `.row { height }` in Feed.module.css. */
@@ -12,7 +12,7 @@ const MAX_ROWS = 40;
 
 type Kind = "buy" | "sell" | "late";
 
-function kindOf(event: BlockEvent): Kind {
+function kindOf(event: TickEvent): Kind {
   const d = event.decision;
   if (!d || d.late) return "late";
   if (d.action === "buy") return "buy";
@@ -38,7 +38,17 @@ const WORD: Record<Kind, string> = { buy: "BUY", sell: "SELL", late: "LATE" };
  * detail becomes the fill instead. The tx column is the order's transaction: dim while pending,
  * "rev" if the book moved through the price before it landed.
  */
-export default function Feed({ events }: { events: BlockEvent[] }) {
+export default function Feed({
+  events,
+  symbol,
+  testnet,
+  category,
+}: {
+  events: TickEvent[];
+  symbol: string;
+  testnet: boolean;
+  category: string;
+}) {
   const listRef = useRef<HTMLDivElement | null>(null);
   // How many whole 26px rows fit in the box the layout gives us. The list
   // itself clips, so a wrong guess is never a half-drawn row, only a hidden one.
@@ -67,7 +77,7 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
       <div className={styles.label}>FEED</div>
       <div className={styles.list} ref={listRef}>
         {rows.length === 0 ? (
-          <div className={styles.empty}>no blocks yet</div>
+          <div className={styles.empty}>no ticks yet</div>
         ) : (
           rows.map((event, i) => {
             const kind = kindOf(event);
@@ -92,11 +102,12 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
             let detail = "";
             let detailMuted = false;
             if (fill && fill.size > 0) {
-              detail = `FILL ${fmtSize(fill.size)} @ ${fmtPrice(fill.price)}`;
+              detail = `FILL ${fmtSize(fill.size)} @ ${fmtPrice(fill.price, event.priceDecimals ?? 4)}`;
             } else if (decided && quote) {
               const word = quote.side === "buy" ? "bid" : "ask";
-              detail = `${word} ${fmtSize(quote.size)} @ ${fmtPrice(quote.price)}${quote.capped ? " cap" : ""}`;
-              detailMuted = quote.status === "reverted" || quote.status === "lost";
+              const dec = event.priceDecimals ?? 4;
+              detail = `${word} ${fmtSize(quote.size)} @ ${fmtPrice(quote.price, dec)}${quote.capped ? " cap" : ""}`;
+              detailMuted = quote.status === "rejected";
             } else if (decided) {
               detail = "no quote";
               detailMuted = true;
@@ -107,8 +118,8 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
               .join(" ");
 
             return (
-              <div key={event.block} className={rowClass}>
-                <span className={`${styles.cell} ${styles.block}`}>{fmtInt(event.block)}</span>
+              <div key={event.tick} className={rowClass}>
+                <span className={`${styles.cell} ${styles.block}`}>{fmtInt(event.tick)}</span>
                 <span className={`${styles.cell} ${styles.word}`}>{WORD[kind]}</span>
                 <span className={`${styles.cell} ${styles.conf}`}>{conf}</span>
                 <span className={`${styles.cell} ${styles.lat}`}>{lat}</span>
@@ -118,21 +129,13 @@ export default function Feed({ events }: { events: BlockEvent[] }) {
                   {detail}
                 </span>
                 <span className={`${styles.cell} ${styles.tx}`}>
-                  {fill && !fill.simulated && fill.txHash ? (
-                    <a href={txUrl(fill.txHash)} target="_blank" rel="noreferrer" title="the taker's transaction">
-                      {shortTx(fill.txHash)}
-                    </a>
-                  ) : quote && quote.status === "sim" ? (
+                  {quote?.status === "sim" || fill?.simulated ? (
                     <span className={styles.muted}>sim</span>
-                  ) : quote && quote.txHash ? (
-                    <a
-                      className={quote.status === "sent" ? styles.pending : quote.status === "placed" ? undefined : styles.muted}
-                      title={quote.status}
-                      href={txUrl(quote.txHash)}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {quote.status === "reverted" ? "rev" : quote.status === "lost" ? "lost" : shortTx(quote.txHash)}
+                  ) : quote?.status === "rejected" ? (
+                    <span className={styles.muted}>rejected</span>
+                  ) : quote?.orderId ? (
+                    <a href={tradeUrl(symbol, testnet, category)} target="_blank" rel="noreferrer" title={quote.status}>
+                      {shortId(quote.orderId)}
                     </a>
                   ) : null}
                 </span>

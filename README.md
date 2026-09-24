@@ -1,70 +1,146 @@
 # jev-trader
 
-One decision every Monad block. A TypeSafe Jev model watches the Kuru MON-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
+A Bun and TypeScript market maker. About every 300 ms it reads the Bybit order book, asks a model whether price goes up or down, and rests **one post-only limit order** on that side, a few ticks inside the touch, replacing the previous order. Fills happen when a taker hits it.
+
+It quotes **SOLUSDT** and **XRPUSDT** at the same time. Each symbol has its own book, position, size, and P&L.
+
+This is a fork of [jarrodwatts/jev-trader](https://github.com/jarrodwatts/jev-trader) by Jarrod Watts (MIT). The original posts on Kuru's MON-USDC book every Monad block. This fork keeps that strategy and the Jev model, and talks to Bybit v5 instead of Monad. The [LICENSE](LICENSE) is unchanged.
+
+## Dry run, testnet, live
+
+| Mode | What happens |
+| --- | --- |
+| Dry run (default) | Live Bybit public books and trades. Real model decisions. Orders are simulated: they rest and fill when a real trade crosses the price. No API keys. |
+| Testnet | `BYBIT_TESTNET=true` and `DRY_RUN=false` with testnet keys. Orders go to Bybit testnet. |
+| Mainnet | `BYBIT_TESTNET=false` and `DRY_RUN=false` with mainnet keys. Real orders, real money. |
+
+Live orders are sent only when **both** keys are set **and** `DRY_RUN=false`. Anything else stays a dry run.
+
+`BYBIT_CATEGORY=linear` (default) is the USDT perpetual. Long and short both work, and the position cap is in base coin. P&L is in USDT. The bot assumes one-way mode (`BYBIT_POSITION_IDX=0`). Hedge mode needs 1 for buys and 2 for sells.
+
+`BYBIT_CATEGORY=spot` is the spot book. Post-only limits work the same way. Bybit will not let a spot sell exceed the base coin you hold, because this bot does not borrow. A dry run still simulates a short so the strategy can be watched. Live spot sells that the wallet cannot fund are rejected and the bot tries the other side.
+
+## Safety
+
+- Position cap per symbol (`SOLUSDT_MAX_POSITION`, `XRPUSDT_MAX_POSITION`).
+- `MAX_LOSS_USD` (default 25) is a kill switch on this process's P&L across both symbols. It cancels every open order and stops quoting. Restart the process to quote again.
+- On shutdown (Ctrl+C or SIGTERM) every open order on these symbols is cancelled.
+- Secrets stay in `.env`, which is gitignored. Do not commit keys.
+
+P&L uses Bybit maker fees, not gas. A dry run uses the published non-VIP schedule (linear maker 0.02% and taker 0.055%, spot 0.10% both sides). With keys, the bot reads `/v5/account/fee-rate`. `MAKER_FEE_RATE` and `TAKER_FEE_RATE` override both.
+
+Tick size, quantity step, and minimum size come from `/v5/market/instruments-info`. If that call fails, a **dry run** infers the tick and quantity step from the live book and assumes a 5 USDT minimum, and keeps retrying. A **live** process refuses to start without instruments-info, so it will not send a real order on a guessed grid.
 
 ## Run
 
-    cp .env.example .env
-    bun install
-    bun run start
+Install [Bun](https://bun.sh), then:
 
-With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. Set `MODEL=jev` and `TYPESAFE_AI_API_KEY` to use Jev; the default `mock` is a momentum heuristic stand-in.
+```sh
+cp .env.example .env
+bun install
+bun run start
+```
+
+Windows 11, Command Prompt (Bun already on PATH):
+
+```bat
+copy .env.example .env
+bun install
+bun run start
+```
+
+Windows 11, PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+bun install
+bun run start
+```
+
+The API listens on `http://localhost:3000`. With `MODEL=mock` you should see a decision and a simulated quote for SOLUSDT and for XRPUSDT a few times a second. No keys required.
+
+### Jev
+
+In `.env`:
+
+```
+MODEL=jev
+TYPESAFE_AI_API_KEY=your_key
+```
+
+`MODEL=mock` is a momentum stand-in and sleeps ~80 ms so the loop behaves like inference. Jev is the TypeSafe model (`JEV_MODEL_ID`, default `jev-latest`) through the AI SDK. The model only chooses buy or sell. Code places the order.
+
+### Live trading
+
+1. Create a Bybit API key that can trade the category you set. Do not enable withdrawals.
+2. Put the key and secret in `.env`.
+3. Prefer testnet first: `BYBIT_TESTNET=true` and `DRY_RUN=false`.
+4. Mainnet: `BYBIT_TESTNET=false` and `DRY_RUN=false`.
+5. Set size and `MAX_LOSS_USD` to amounts you can lose.
+6. `bun run start`. Leftover open orders on these symbols are cancelled at startup.
+
+The loop is `LOOP_MS` (default 300). Two symbols at that pace, one amend or create each, stay under Bybit's published 10 orders/second limit. `MAX_ORDERS_PER_SEC` (default 8) is a local cap. If the model is still thinking when the next tick arrives, that tick is late and quotes nothing.
+
+## Dashboard
+
+```sh
+cd web
+bun install
+```
+
+Point it at the API. Copy `web/.env.example` to `web/.env.local` (it already says `http://localhost:3000`), then:
+
+```sh
+bun run dev
+```
+
+Windows: `copy .env.example .env.local` from the `web` folder, then `bun run dev`. Open the URL Next prints (usually `http://localhost:3000` on the web app; if the API is also on 3000, Next will pick another port).
+
+The page shows both symbols: price, the buy/sell call, the resting quote, fills, and P&L.
 
 ## Endpoints
 
-Deployed (dry run, mock model): https://jev-trader-production.up.railway.app
+- `GET /` snapshot: model, dry run, category, testnet, fees, kill switch, latest event per symbol
+- `GET /history` last 1000 events per symbol
+- `GET /history/SOLUSDT` one symbol
+- `GET /events` SSE: `snapshot` on connect, then `block` (one decision), `fill`, `status`, `ping`
 
-- `GET /` snapshot: model, wallet, dryRun, latest block event
-- `GET /history` last 1000 block events
-- `GET /events` SSE: `snapshot` on connect, then one `block` event per block, plus a `fill` event whenever a live order's receipt lands
+A `block` event looks like:
 
-Every event (see `src/trader.ts` for types):
+```json
+{
+  "symbol": "SOLUSDT",
+  "tick": 12,
+  "mid": 117.02,
+  "bestBid": 117.01,
+  "bestAsk": 117.03,
+  "spreadBps": 1.71,
+  "decision": { "action": "buy", "probabilities": { "buy": 0.62, "sell": 0.38, "hold": 0 }, "upIn10": 0.62, "latencyMs": 81, "late": false },
+  "quote": { "side": "buy", "price": 117.02, "size": 0.1, "status": "sim", "capped": false, "orderId": "sim-3" },
+  "position": { "side": "flat", "size": 0, "entryPrice": null, "unrealizedUsd": 0 },
+  "totals": { "ticks": 12, "decisions": 12, "quotes": 12, "fills": 0, "feesUsd": 0, "pnlUsd": 0, "pnlPct": 0 }
+}
+```
 
-    {
-      "block": 105488269, "ts": 1789593630676,
-      "mid": 0.022636, "bestBid": 0.022628, "bestAsk": 0.022644, "spreadBps": 7.07,
-      "decision": { "action": "buy", "probabilities": { "buy": 0.77, "sell": 0.23, "hold": 0 }, "upIn10": 0.77, "latencyMs": 81, "late": false },
-      "quote": { "side": "buy", "price": 0.022629, "size": 200, "txHash": "0x…", "gasMon": 0.0357, "cancel": [100295801], "status": "sent", "orderId": null, "capped": false },
-      "fill": null,
-      "resting": { "bidMon": 200, "askMon": 200 },
-      "position": { "side": "short", "size": 200, "entryPrice": 0.022633, "unrealizedUsd": -0.0006, "unrealizedMon": -0.027 },
-      "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 }
-    }
-
-Every block the model is asked about the move over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is the order that block put on the book: a post-only limit order of `TRADE_SIZE_MON` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). `hold` appears only with `decision.late: true`, when the model missed the block and nothing was posted. When the position cap (or, live, margin funds) blocks a side, the quote goes on the other side with `capped: true` and `probabilities` still show the model's call. `resting` is our size known to be on the book after this block. `upIn10` equals the buy probability.
-
-Live sends are fired and forgotten, so the `block` event carries the **intent**: `status: "sent"`, `gasMon` is `gasLimit x (last known base fee + priority)`. Monad charges the gas limit, so that is the real cost whether the order lands or not. The receipt arrives a block or two later as its own SSE event:
-
-    event: quote
-    data: { "block": 105488269, "quote": { …, "status": "placed", "orderId": 100295812, "gasMon": 0.0357 } }
-
-`status` becomes `placed` (with the order id) or `reverted` (the book moved through the price before the tx landed, or a cancelled order had already filled). No receipt after 10 blocks gives `lost`. Fills are not in our own transactions: someone else's taker order hits our resting one, and the Trade log for it arrives via the same `eth_getLogs` poll that feeds the model. Each block with fills gets its own SSE event, and `position`, `realizedUsd` and `fills` update then:
-
-    event: fill
-    data: { "block": 105488271, "fill": { "side": "buy", "size": 200, "price": 0.022629, "txHash": "0x…", "orderId": 100295812, "simulated": false } }
-
-`txHash` is the taker's transaction. In a dry run the quote is `status: "sim"`: the order rests for one block and a real print crossing its price fills it (`simulated: true`).
+`hold` is only a late tick (the previous decision was still running). `capped: true` means the position cap or the wallet forced the other side. The probabilities are still the model's call. `status` is `sim` in a dry run, or `placed`, `amended`, `kept`, or `rejected` live.
 
 ## Layout
 
-    src/config.ts   env
-    src/chain.ts    block feed (WebSocket newHeads + polling backstop, newest block only), raw RPC
-    src/book.ts     one-eth_call order book reader (decodes getL2Book, merges the AMM vault)
-    src/market.ts   Kuru: read book, hand-encoded batchUpdate (cancel + post-only place), margin deposits, local nonce, async confirmation
-    src/model.ts    Model interface, JevModel (AI SDK experimental_evaluate), MockModel
-    src/trader.ts   the loop: one in flight, hold when late, position and P&L accounting
-    src/server.ts   Bun.serve: snapshot, history, SSE
+```
+src/config.ts            env, per-symbol size and caps
+src/model.ts             Jev and the mock model
+src/trader.ts            one symbol: decide, quote, position, P&L, kill switch
+src/server.ts            snapshot, history, SSE
+src/bybit/public.ts      public WebSocket order book and trades
+src/bybit/venue.ts       private REST orders and private WebSocket fills
+src/bybit/instrument.ts  tick size, qty step, minimum size
+src/index.ts             both symbols, timer, shutdown
+web/                     Next.js dashboard
+```
 
-## The 300 ms budget
+## Checks
 
-A decision and an order have to fit in one block, so the hot loop makes exactly two RPC round trips:
-one `eth_call` for the book (~18 ms on the public RPC, `READ_RPC_URL`) and one `eth_sendRawTransaction`
-(`RPC_URL`), which returns as soon as the tx is accepted. Nothing else is on the path — no
-`eth_estimateGas` (Monad charges gas on the limit, so the limit is hardcoded or derived once at
-startup), no `eth_sendRawTransactionSync` (it blocks until the tx is Proposed), no gas price lookup
-(static type-2 fees: `MAX_FEE_GWEI` cap, 2 gwei priority; the effective price is base + priority).
-Receipts, the fee estimate and the vault check run off the hot path on later blocks. Measured in a
-dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it the mock's inference stand-in).
-
-    bun run scripts/bench-read.ts     # book reader vs the SDK: exactness and latency
-    bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
+```sh
+bun test
+bun run typecheck
+```

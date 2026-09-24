@@ -1,31 +1,23 @@
-# Jev Trader — web
+# Jev Trader web
 
-Next.js (App Router, TypeScript, CSS Modules — no Tailwind) frontend for Jev Trader:
-one AI trade decision every Monad block.
+Next.js dashboard for the Bybit bot. It shows SOLUSDT and XRPUSDT side by side: price, the model's buy or sell call, the resting quote, fills, and P&L.
 
 ## Run
 
-```bash
-export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-cache" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+From this folder, with the API already running (see the repo README):
+
+```sh
 bun install
-bun run dev      # http://localhost:3000
-bun run build
+copy .env.example .env.local
+bun run dev
 ```
 
-Use Bun only — npm is broken on this machine.
+On macOS or Linux use `cp .env.example .env.local` instead of `copy`.
 
-## Config
+`NEXT_PUBLIC_API_URL` is the API origin, default `http://localhost:3000`. The page opens `$NEXT_PUBLIC_API_URL/events`.
 
-Copy `.env.example` to `.env.local`. `NEXT_PUBLIC_API_URL` points at the backend
-(default `https://jev-trader-production.up.railway.app`); the app opens an
-EventSource on `$NEXT_PUBLIC_API_URL/events`.
+If the API is on port 3000, start Next on another port:
 
-## Layout
-
-- `src/lib/types.ts` — wire types (`BlockEvent`, `Decision`, `Fill`, `Meta`, …)
-- `src/lib/useFeed.ts` — SSE hook: snapshot / block / fill / ping, 1000-event
-  window, 1s→10s reconnect backoff, `connection` state, `avgLatencyMs`
-- `src/lib/useUptime.ts` — `useUptime(startedAt)` → ticking `"hh:mm:ss"`
-- `src/lib/format.ts` — number/address/tx formatting
-- `src/app/globals.css` — design tokens, `pulse`/`breathe` keyframes, `.card`
-- `src/components/<Name>/<Name>.tsx` — UI components (one folder each)
+```sh
+bun run dev -- --port 3001
+```

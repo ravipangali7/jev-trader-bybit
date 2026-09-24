@@ -11,9 +11,9 @@ export function fmtInt(n: number | null | undefined): string {
   return INT.format(Math.round(safe(n)));
 }
 
-/** 0.0222354 -> "0.022235" (6 decimals, MON/USDC ticks) */
-export function fmtPrice(n: number | null | undefined): string {
-  return safe(n).toFixed(6);
+/** Price on the instrument's tick grid. */
+export function fmtPrice(n: number | null | undefined, decimals = 4): string {
+  return safe(n).toFixed(decimals);
 }
 
 /** 0.0045 -> "$0.0045"; negatives -> "-$0.0045" */
@@ -90,6 +90,13 @@ export function shortTx(h: string | null | undefined): string {
   return h.length <= 6 ? h : `${h.slice(0, 6)}…`;
 }
 
-export function txUrl(h: string): string {
-  return `https://monadvision.com/tx/${h}`;
+export function shortId(h: string | null | undefined): string {
+  if (!h) return "";
+  return h.length <= 8 ? h : `${h.slice(0, 8)}…`;
+}
+
+export function tradeUrl(symbol: string, testnet: boolean, category: string): string {
+  const host = testnet ? "https://testnet.bybit.com" : "https://www.bybit.com";
+  if (category === "spot") return `${host}/trade/spot/${symbol}`;
+  return `${host}/trade/usdt/${symbol}`;
 }
