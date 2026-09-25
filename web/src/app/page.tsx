@@ -4,30 +4,52 @@ import DecisionPanel from "@/components/DecisionPanel/DecisionPanel";
 import Feed from "@/components/Feed/Feed";
 import FlowChart from "@/components/FlowChart/FlowChart";
 import Header from "@/components/Header/Header";
+import Performance from "@/components/Performance/Performance";
 import StatsRow from "@/components/StatsRow/StatsRow";
 import { useFeed } from "@/lib/useFeed";
 import styles from "./page.module.css";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://jev-trader-production.up.railway.app";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
 
 export default function Page() {
   const feed = useFeed(API_URL);
+  const symbols = feed.meta?.symbols?.length ? feed.meta.symbols : ["SOLUSDT", "XRPUSDT"];
+  const category = feed.meta?.category ?? "linear";
+  const testnet = feed.meta?.testnet ?? false;
+  const venue = `Bybit ${category}`;
 
   return (
     <div className="card">
-      <Header meta={feed.meta} latest={feed.latest} connection={feed.connection} />
-      <StatsRow latest={feed.latest} avgLatencyMs={feed.avgLatencyMs} meta={feed.meta} />
-      <div className={styles.main}>
-        <div className={styles.left}>
-          <div className={styles.chartWrap}>
-            <FlowChart events={feed.events} latest={feed.latest} />
-          </div>
-        </div>
-        <div className={styles.right}>
-          <DecisionPanel latest={feed.latest} />
-          <Feed events={feed.events} />
-        </div>
+      <Header meta={feed.meta} connection={feed.connection} books={feed.books} />
+      <StatsRow meta={feed.meta} books={feed.books} />
+      {feed.meta?.killed ? (
+        <div className={styles.halt}>{feed.meta.killReason ?? "quoting stopped"}</div>
+      ) : null}
+      <div className={styles.columns}>
+        {symbols.map((symbol) => {
+          const book = feed.books[symbol];
+          const latest = book?.latest ?? null;
+          return (
+            <section key={symbol} className={styles.column}>
+              <div className={styles.chartWrap}>
+                <FlowChart
+                  events={book?.events ?? []}
+                  latest={latest}
+                  symbol={symbol}
+                  priceDecimals={latest?.priceDecimals ?? (symbol === "XRPUSDT" ? 4 : 2)}
+                  venue={venue}
+                />
+              </div>
+              <div className={styles.lower}>
+                <DecisionPanel latest={latest} symbol={symbol} />
+                <Feed events={book?.events ?? []} symbol={symbol} testnet={testnet} category={category} />
+              </div>
+            </section>
+          );
+        })}
       </div>
+      <Performance api={API_URL} symbols={symbols} />
+      <p className={styles.footer}>Experimental. Paper trading until DRY_RUN is false. Not financial advice.</p>
     </div>
   );
 }

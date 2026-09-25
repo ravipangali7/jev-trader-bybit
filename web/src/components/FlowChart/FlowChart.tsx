@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import type { BlockEvent } from "@/lib/types";
-import { fmtConf, fmtMon, fmtPrice, fmtSigned, fmtSignedMon } from "@/lib/format";
+import type { TickEvent } from "@/lib/types";
+import { fmtConf, fmtPrice, fmtSigned } from "@/lib/format";
 import { smoothPath } from "./smooth";
 import styles from "./FlowChart.module.css";
 
@@ -14,9 +14,9 @@ const EASE = 0.1; // scale easing per new block
 const MIN_RANGE_PCT = 0.002; // floor of 0.20% of price, so bps noise stays calm
 const CELL_W = 6;
 const CELL_H = 18;
-const TAG_W = 58;
+const TAG_W = 72;
 
-function cellFill(e: BlockEvent): string {
+function cellFill(e: TickEvent): string {
   if (e.decision?.late) return "var(--late-cell)";
   const side = e.fill?.side ?? e.decision?.action;
   if (side === "buy") return "var(--buy-bar)";
@@ -24,12 +24,22 @@ function cellFill(e: BlockEvent): string {
   return "var(--hold-cell)";
 }
 
+function baseCoin(symbol: string): string {
+  return symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol;
+}
+
 export default function FlowChart({
   events,
   latest,
+  symbol,
+  priceDecimals,
+  venue,
 }: {
-  events: BlockEvent[];
-  latest: BlockEvent | null;
+  events: TickEvent[];
+  latest: TickEvent | null;
+  symbol: string;
+  priceDecimals: number;
+  venue: string;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const originRef = useRef<number | null>(null);
@@ -62,13 +72,14 @@ export default function FlowChart({
     const n = Math.max(2, Math.ceil((w - ANCHOR_GAP) / STEP) + 2);
     let series = events.slice(-n);
     const tail = series[series.length - 1];
-    if (latest && (!tail || latest.block > tail.block)) series = [...series, latest].slice(-n);
-    else if (latest && tail && latest.block === tail.block) series[series.length - 1] = latest;
+    if (latest && (!tail || latest.tick > tail.tick)) series = [...series, latest].slice(-n);
+    else if (latest && tail && latest.tick === tail.tick) series[series.length - 1] = latest;
     const last = series[series.length - 1];
     if (!last) return null;
 
-    if (originRef.current === null) originRef.current = series[0].block;
+    if (originRef.current === null) originRef.current = series[0].tick;
     const origin = originRef.current;
+    const price = (n: number) => fmtPrice(n, priceDecimals);
     const fx = (b: number) => (b - origin) * STEP;
 
     // --- value scale: window min/max, floored to 0.20% of price, eased 10%/block
@@ -88,7 +99,7 @@ export default function FlowChart({
     }
     const prev = scaleRef.current;
     if (prev) {
-      if (prev.block === last.block) {
+      if (prev.block === last.tick) {
         lo = prev.lo;
         hi = prev.hi;
       } else {
@@ -106,38 +117,38 @@ export default function FlowChart({
         hi = c + floor / 2;
       }
     }
-    scaleRef.current = { lo, hi, block: last.block };
+    scaleRef.current = { lo, hi, block: last.tick };
 
     const range = hi - lo || 1;
     const fy = (p: number) => PAD_TOP + (1 - (p - lo) / range) * plotH;
 
-    const pts = series.map((e) => [fx(e.block), fy(e.mid)] as const);
+    const pts = series.map((e) => [fx(e.tick), fy(e.mid)] as const);
     const line = smoothPath(pts);
     const base = h - PAD_BOTTOM;
     const area = `${line} L${pts[pts.length - 1][0].toFixed(1)} ${base} L${pts[0][0].toFixed(1)} ${base} Z`;
 
     const cells = series.map((e, i) => ({
-      key: e.block,
-      x: fx(e.block) - CELL_W / 2,
+      key: e.tick,
+      x: fx(e.tick) - CELL_W / 2,
       fill: cellFill(e),
-      opacity: i === series.length - 1 ? 1 : e.quote && e.quote.status === "sent" ? 0.6 : 0.82,
+      opacity: i === series.length - 1 ? 1 : e.quote?.status === "rejected" ? 0.45 : 0.82,
     }));
 
     const beads = series
       .filter((e) => e.fill)
       .map((e) => ({
-        key: e.block,
-        x: fx(e.block),
+        key: e.tick,
+        x: fx(e.tick),
         y: fy(e.mid),
         fill: e.fill!.side === "buy" ? "var(--buy)" : "var(--sell)",
       }));
 
     const ticks = [0.25, 0.5, 0.75].map((f) => ({
       y: PAD_TOP + plotH * f,
-      label: fmtPrice(lo + (1 - f) * range),
+      label: price(lo + (1 - f) * range),
     }));
 
-    const byBlock = new Map(series.map((e) => [e.block, e]));
+    const byBlock = new Map(series.map((e) => [e.tick, e]));
 
     return {
       line,
@@ -152,40 +163,41 @@ export default function FlowChart({
       fy,
       last,
       base,
-      shift: w - ANCHOR_GAP - fx(last.block),
+      shift: w - ANCHOR_GAP - fx(last.tick),
       endY: fy(last.mid),
     };
-  }, [events, latest, w, h]);
+  }, [events, latest, w, h, priceDecimals]);
 
   const hv = useMemo(() => {
     if (!model || hover === null) return null;
     const e = model.byBlock.get(hover);
     if (!e) return null;
-    const x = model.fx(e.block);
+    const x = model.fx(e.tick);
     const flip = x + model.shift > w - 168;
     const ty = Math.min(Math.max(model.fy(e.mid) - 92, PAD_TOP - 46), model.base - 82);
     const side = e.fill ? (e.fill.side === "buy" ? "BUY" : "SELL") : null;
     const q = e.quote;
-    const quoteText = q ? `${q.side === "buy" ? "bid" : "ask"} ${fmtPrice(q.price)}` : "no quote";
+    const dec = e.priceDecimals ?? priceDecimals;
+    const quoteText = q ? `${q.side === "buy" ? "bid" : "ask"} ${fmtPrice(q.price, dec)}` : "no quote";
     return {
       x,
       y: model.fy(e.mid),
       tx: flip ? x - 146 : x + 14,
       ty,
-      block: `#${e.block}`,
-      price: fmtPrice(e.mid),
-      trade: side ? `FILL ${side} ${fmtMon(e.fill!.size, 0)}` : quoteText,
+      block: `#${e.tick}`,
+      price: fmtPrice(e.mid, dec),
+      trade: side ? `FILL ${side} ${e.fill!.size}` : quoteText,
       tint: e.fill ? (e.fill.side === "buy" ? "var(--buy-ink)" : "var(--sell-ink)") : q ? (q.side === "buy" ? "var(--buy-ink)" : "var(--sell-ink)") : "var(--muted)",
       lat: e.decision && !e.decision.late ? `${Math.round(e.decision.latencyMs)} ms` : "late",
     };
-  }, [model, hover, w]);
+  }, [model, hover, w, priceDecimals]);
 
   const shown = latest ?? events[events.length - 1] ?? null;
   const d = shown?.decision ?? null;
   const late = d?.late === true;
-  const act = late ? "late" : (d?.action ?? "hold");
+  const act = late ? "late" : !d || d.action === "hold" ? "hold" : d.probabilities.buy >= d.probabilities.sell ? "buy" : "sell";
   const word =
-    act === "buy" ? "Buying" : act === "sell" ? "Selling" : act === "late" ? "Missed the block" : "Holding";
+    act === "buy" ? "Buying" : act === "sell" ? "Selling" : act === "late" ? "Missed the tick" : "Holding";
   const wordColor =
     act === "buy"
       ? "var(--buy-ink)"
@@ -194,15 +206,15 @@ export default function FlowChart({
         : act === "late"
           ? "var(--late-ink)"
           : "var(--ink)";
-  const wordRef = useRef<{ act: string; block: number }>({ act, block: shown?.block ?? 0 });
-  if (wordRef.current.act !== act) wordRef.current = { act, block: shown?.block ?? 0 };
+  const wordRef = useRef<{ act: string; block: number }>({ act, block: shown?.tick ?? 0 });
+  if (wordRef.current.act !== act) wordRef.current = { act, block: shown?.tick ?? 0 };
   const conf = d ? Math.max(d.probabilities.buy, d.probabilities.sell, d.probabilities.hold) : 0;
   const pos = shown?.position;
   const stance =
     !pos || pos.side === "flat"
       ? "flat"
-      : `${pos.side} ${fmtMon(pos.size, Number.isInteger(pos.size) ? 0 : 3)}`;
-  const pnlMon = shown?.totals?.pnlMon ?? 0;
+      : `${pos.side} ${pos.size} ${baseCoin(symbol)}`;
+  const pnlUsd = shown?.totals?.pnlUsd ?? 0;
   const pnlPct = shown?.totals?.pnlPct ?? 0;
 
   return (
@@ -219,7 +231,7 @@ export default function FlowChart({
         onPointerLeave={() => setHover(null)}
       >
         {!model || !shown ? (
-          <div className={styles.empty}>waiting for blocks…</div>
+          <div className={styles.empty}>waiting for ticks</div>
         ) : (
           <>
             <svg className={styles.svg} viewBox={`0 0 ${w} ${h}`} width={w} height={h} aria-hidden="true">
@@ -319,7 +331,7 @@ export default function FlowChart({
                 <circle cx={w - ANCHOR_GAP} cy="0" r="4" fill="var(--ink)" />
                 <rect x={w - TAG_W - 4} y="-10" width={TAG_W} height="20" rx="999" fill="var(--ink)" />
                 <text className={styles.tagText} x={w - 4 - TAG_W / 2} y="4" textAnchor="middle">
-                  {fmtPrice(model.last.mid)}
+                  {fmtPrice(model.last.mid, priceDecimals)}
                 </text>
               </g>
             </svg>
@@ -328,14 +340,14 @@ export default function FlowChart({
 
             <div className={styles.tl}>
               <div className={styles.price} key={shown.mid}>
-                {fmtPrice(shown.mid)}
+                {fmtPrice(shown.mid, priceDecimals)}
               </div>
               <div className={styles.sub}>
-                <span>MON/USDC</span>
-                <span>Kuru</span>
+                <span>{symbol}</span>
+                <span>{venue}</span>
                 <span>{stance}</span>
-                <span style={{ color: pnlMon >= 0 ? "var(--pnl-pos)" : "var(--pnl-neg)" }}>
-                  p&amp;l {fmtSignedMon(pnlMon, 3)} ({fmtSigned(pnlPct, 2)}%)
+                <span style={{ color: pnlUsd >= 0 ? "var(--pnl-pos)" : "var(--pnl-neg)" }}>
+                  p&amp;l {pnlUsd < 0 ? "-" : "+"}${Math.abs(pnlUsd).toFixed(4)} ({fmtSigned(pnlPct, 2)}%)
                 </span>
               </div>
             </div>

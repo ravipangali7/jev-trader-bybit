@@ -1,7 +1,9 @@
 # Jev Trader — Product Spec
 
+This fork quotes Bybit SOLUSDT and XRPUSDT instead of Kuru MON-USDC on Monad. Where the sections below say Monad, Kuru, a block, or MON, read Bybit, the two USDT books, and a timer of about 300 ms. The live behavior is in README.md.
+
 ## One line
-A live public dashboard showing an AI make a real trade decision on Monad every 300 ms block.
+A live dashboard showing an AI make a trade decision on Bybit about every 300 ms, on SOLUSDT and XRPUSDT.
 
 ## What it is
 A single-page web app. A TypeSafe "Jev" model (a System One model: no text output, returns typed decisions with probabilities in ~100 ms) watches the MON-USDC order book on Kuru, Monad's on-chain exchange. Every block (300 ms) it answers one question: buy or sell. Every block is a real order from a real wallet, confirmed in the same block. The page shows this happening live.

@@ -1,11 +1,12 @@
 "use client";
 
-import type { BlockEvent } from "@/lib/types";
+import type { TickEvent } from "@/lib/types";
 import { fmtPct } from "@/lib/format";
 import styles from "./DecisionPanel.module.css";
 
 export interface DecisionPanelProps {
-  latest: BlockEvent | null;
+  latest: TickEvent | null;
+  symbol: string;
 }
 
 type Chosen = "buy" | "sell" | null;
@@ -47,18 +48,20 @@ function BarRow({ label, labelColor, active, value, fill, pct }: BarRowProps) {
   );
 }
 
-export default function DecisionPanel({ latest }: DecisionPanelProps) {
+export default function DecisionPanel({ latest, symbol }: DecisionPanelProps) {
   const decision = latest?.decision ?? null;
   const late = decision ? decision.late : true;
-  // "hold" is treated as a non-decision, exactly as the feed does.
-  const chosen: Chosen =
-    decision && !decision.late && decision.action !== "hold"
-      ? decision.action
-      : null;
-
   const probs = decision?.probabilities ?? { buy: 0, sell: 0, hold: 0 };
+  // The headline is the model's call. A position cap can still rest the other side (`quote.capped`).
+  const chosen: Chosen =
+    decision && !decision.late ? (probs.buy >= probs.sell ? "buy" : "sell") : null;
+
   const decided = decision !== null && !late && chosen !== null;
   const pctOf = (p: number) => (decided ? fmtPct(p) : "-");
+  const quote = latest?.quote ?? null;
+  const orderLine = quote
+    ? `${quote.side === "buy" ? "Bid" : "Ask"} ${quote.size} @ ${quote.price.toFixed(latest?.priceDecimals ?? 4)}${quote.capped ? ", position cap" : ""}`
+    : `Post one post-only order on ${symbol}. Every tick. No abstaining.`;
 
   const headline = chosen ? (chosen === "buy" ? "BUY" : "SELL") : "LATE";
   const headlineColor = chosen
@@ -73,13 +76,13 @@ export default function DecisionPanel({ latest }: DecisionPanelProps) {
       <section className={styles.section}>
         <div className={styles.sectionLabel}>STANDING ORDER</div>
         <div className={styles.order}>
-          {"> post a bid or an ask on Kuru's MON/USDC book. every block. no abstaining."}
+          {orderLine}
         </div>
       </section>
 
       <section className={styles.section}>
         <div className={`${styles.sectionLabel} ${styles.sectionLabelGap}`}>
-          WHICH SIDE THIS BLOCK?
+          WHICH SIDE THIS TICK?
         </div>
 
         <div className={styles.headline} style={{ color: headlineColor }}>

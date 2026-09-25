@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Jev Trader",
-  description: "One AI trade decision every Monad block.",
+  description: "Jev quotes SOLUSDT and XRPUSDT on Bybit about every 300 ms.",
 };
 
 export const viewport: Viewport = {

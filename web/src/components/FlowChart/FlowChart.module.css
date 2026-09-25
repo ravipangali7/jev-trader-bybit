@@ -73,7 +73,7 @@
 .halo {
   transform-box: fill-box;
   transform-origin: center;
-  animation: halo 2.2s ease-out infinite;
+  animation: none;
   pointer-events: none;
 }
 
