@@ -22,7 +22,7 @@ Live orders are sent only when **both** keys are set **and** `DRY_RUN=false`. An
 
 ## Safety
 
-- Position cap per symbol (`SOLUSDT_MAX_POSITION`, `XRPUSDT_MAX_POSITION`).
+- Each symbol's exposure is capped at its equity times `LEVERAGE` (default 1). `SOLUSDT_MAX_POSITION` and `XRPUSDT_MAX_POSITION` are optional tighter ceilings in base coin.
 - `MAX_LOSS_USD` (default 25) is a kill switch on this process's P&L across both symbols. It cancels every open order and stops quoting. Restart the process to quote again.
 - On shutdown (Ctrl+C or SIGTERM) every open order on these symbols is cancelled.
 - Secrets stay in `.env`, which is gitignored. Do not commit keys.
@@ -57,7 +57,31 @@ bun install
 bun run start
 ```
 
-The API listens on `http://localhost:3000`. With `MODEL=mock` you should see a decision and a simulated quote for SOLUSDT and for XRPUSDT a few times a second. No keys required.
+The API listens on `PORT` (default 3000 when unset, 3100 in `.env.example`). With `MODEL=mock` you should see a decision and a simulated quote for SOLUSDT and for XRPUSDT a few times a second. No keys required.
+
+### 24 hour paper run (Windows 11)
+
+`DRY_RUN=true` and `MODEL=mock` need no TypeSafe key. Each symbol starts at `SOLUSDT_START_USD` and `XRPUSDT_START_USD` (default 100). Equity is start + realized P&L + unrealized P&L - fees. Fills and equity snapshots are written to `data/paper.sqlite` and reloaded after a crash or restart.
+
+Two PowerShell windows, from the repo root, after `Copy-Item .env.example .env` and `bun install` (and `bun install` inside `web`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-paper.ps1 -Port 3100
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run-dashboard.ps1 -ApiPort 3100 -Port 3101
+```
+
+The first script restarts the bot if it exits and appends to `data\bot.log`. The second restarts the dashboard and appends to `data\dashboard.log`. Open `http://127.0.0.1:3101`. Public Bybit WebSockets reconnect on their own. A REST or model error is logged and that tick is skipped. A model call slower than `MODEL_TIMEOUT_MS` (default 5000) is a skipped tick.
+
+Wipe the paper account:
+
+```powershell
+bun run reset-paper
+```
+
+Or set `RESET_PAPER=true` for one launch, then set it back to false so the next start does not wipe again.
 
 ### Jev
 
@@ -88,15 +112,15 @@ cd web
 bun install
 ```
 
-Point it at the API. Copy `web/.env.example` to `web/.env.local` (it already says `http://localhost:3000`), then:
+Point it at the API. Copy `web/.env.example` to `web/.env.local` (it says `http://127.0.0.1:3100`), then:
 
 ```sh
-bun run dev
+bun run dev -- --port 3101
 ```
 
-Windows: `copy .env.example .env.local` from the `web` folder, then `bun run dev`. Open the URL Next prints (usually `http://localhost:3000` on the web app; if the API is also on 3000, Next will pick another port).
+Windows: `copy .env.example .env.local` from the `web` folder, then `bun run dev -- --port 3101`. Open `http://127.0.0.1:3101`. If the bot is on another port, set `NEXT_PUBLIC_API_URL` before starting Next.
 
-The page shows both symbols: price, the buy/sell call, the resting quote, fills, and P&L.
+The page shows both books, then paper performance: equity, P&L, win rate, drawdown, an equity chart, and the trade list.
 
 ## Endpoints
 
@@ -104,6 +128,9 @@ The page shows both symbols: price, the buy/sell call, the resting quote, fills,
 - `GET /history` last 1000 events per symbol
 - `GET /history/SOLUSDT` one symbol
 - `GET /events` SSE: `snapshot` on connect, then `block` (one decision), `fill`, `status`, `ping`
+- `GET /summary` per-symbol and combined paper metrics (fills, round trips, win rate, P&L, fees, ROI, drawdown, equity, run time)
+- `GET /trades?symbol=SOLUSDT&limit=50&offset=0` fills, newest first
+- `GET /equity` equity snapshots for each symbol and `COMBINED`
 
 A `block` event looks like:
 
@@ -127,14 +154,18 @@ A `block` event looks like:
 ## Layout
 
 ```
-src/config.ts            env, per-symbol size and caps
+src/config.ts            env, per-symbol size, starting balance, leverage
+src/account.ts           equity, round trips, drawdown
+src/store.ts             sqlite paper fills and equity snapshots
 src/model.ts             Jev and the mock model
 src/trader.ts            one symbol: decide, quote, position, P&L, kill switch
-src/server.ts            snapshot, history, SSE
+src/server.ts            snapshot, history, summary, trades, equity, SSE
 src/bybit/public.ts      public WebSocket order book and trades
 src/bybit/venue.ts       private REST orders and private WebSocket fills
 src/bybit/instrument.ts  tick size, qty step, minimum size
 src/index.ts             both symbols, timer, shutdown
+scripts/run-paper.ps1    Windows supervisor for the bot
+scripts/run-dashboard.ps1 Windows supervisor for the dashboard
 web/                     Next.js dashboard
 ```
 

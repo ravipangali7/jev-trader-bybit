@@ -36,13 +36,13 @@ const buyModel: Model = {
   },
 };
 
-function make(data: FakeData, extra: { maxPosition?: number; maxLossUsd?: number; model?: Model } = {}) {
+function make(data: FakeData, extra: { maxPosition?: number | null; maxLossUsd?: number; model?: Model; size?: number; startUsd?: number; leverage?: number; modelTimeoutMs?: number } = {}) {
   let killed = false;
   let reason = "";
   const events: Quote[] = [];
   const box: { trader: SymbolTrader | null } = { trader: null };
   const trader = new SymbolTrader({
-    spec: { symbol: "SOLUSDT", size: 0.1, insideTicks: 1, maxPosition: extra.maxPosition ?? 1 },
+    spec: { symbol: "SOLUSDT", size: extra.size ?? 0.1, insideTicks: 1, maxPosition: extra.maxPosition === undefined ? 1 : extra.maxPosition },
     instrument: inst,
     model: extra.model ?? buyModel,
     data,
@@ -59,6 +59,9 @@ function make(data: FakeData, extra: { maxPosition?: number; maxLossUsd?: number
     isKilled: () => killed,
     onEvent: (e) => { if (e.quote) events.push(e.quote); },
     onFill: () => {},
+    startUsd: extra.startUsd ?? 100,
+    leverage: extra.leverage ?? 1,
+    modelTimeoutMs: extra.modelTimeoutMs,
   });
   box.trader = trader;
   return { trader, events, killed: () => killed, reason: () => reason };
@@ -147,6 +150,27 @@ test("inventory accounting and the kill switch", () => {
   expect(shouldKill(-25, 25)).toBe(true);
   expect(shouldKill(-24.99, 25)).toBe(false);
   expect(shouldKill(1, 25)).toBe(false);
+});
+
+test("equity at 1x shrinks an order that would exceed the account", async () => {
+  const data = new FakeData();
+  const { trader } = make(data, { size: 2, maxPosition: null, startUsd: 100, leverage: 1 });
+  await trader.onTick();
+  const quote = trader.history.at(-1)?.quote;
+  expect(quote?.side).toBe("buy");
+  expect(quote?.size).toBeLessThanOrEqual(1);
+  expect(quote?.size).toBeGreaterThanOrEqual(0.1);
+  const notional = (quote?.size ?? 0) * (quote?.price ?? 0);
+  expect(notional).toBeLessThanOrEqual(100 + 1e-6);
+});
+
+test("a model that never answers is a late tick", async () => {
+  const data = new FakeData();
+  const model: Model = { name: "hang", decide: () => new Promise(() => undefined) };
+  const { trader } = make(data, { model, modelTimeoutMs: 30 });
+  await trader.onTick();
+  expect(trader.history.at(-1)?.decision?.late).toBe(true);
+  expect(trader.history.at(-1)?.quote).toBeNull();
 });
 
 test("snapshot endpoint lists both symbols", async () => {

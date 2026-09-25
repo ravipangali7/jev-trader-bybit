@@ -7,7 +7,10 @@ export interface SymbolSpec {
   /** Null means "use the exchange minimum that clears min notional". */
   size: number | null;
   insideTicks: number;
-  /** Null means 10 times the order size, once that size is known. */
+  /**
+   * Extra ceiling in base coin. Null means the only cap is equity times leverage,
+   * so a $100 account at 1x cannot hold more than $100 of exposure.
+   */
   maxPosition: number | null;
 }
 
@@ -50,15 +53,23 @@ function defaultSize(symbol: string): number | null {
   return null;
 }
 
-function defaultCap(symbol: string): number | null {
-  if (symbol === "SOLUSDT") return 1;
-  if (symbol === "XRPUSDT") return 50;
-  return null;
+/** Per-symbol paper starting balance. `{SYMBOL}_START_USD`, then START_USD, then BANKROLL_USD, then 100. */
+export function symbolStartUsd(source: Record<string, string | undefined>, symbol: string): number {
+  const n = num(source, `${symbol}_START_USD`) ?? num(source, "START_USD") ?? num(source, "BANKROLL_USD") ?? 100;
+  if (n < 0) throw new Error(`${symbol} starting balance cannot be negative`);
+  return n;
+}
+
+/** Exposure cap is equity times this. Default 1. */
+export function resolveLeverage(source: Record<string, string | undefined>): number {
+  const n = num(source, "LEVERAGE") ?? 1;
+  if (!(n > 0)) throw new Error("LEVERAGE must be positive");
+  return n;
 }
 
 export function symbolSpec(source: Record<string, string | undefined>, symbol: string): SymbolSpec {
   const size = num(source, `${symbol}_SIZE`) ?? num(source, "ORDER_SIZE") ?? defaultSize(symbol);
-  const maxPosition = num(source, `${symbol}_MAX_POSITION`) ?? num(source, "MAX_POSITION") ?? defaultCap(symbol);
+  const maxPosition = num(source, `${symbol}_MAX_POSITION`) ?? num(source, "MAX_POSITION");
   const insideTicks = num(source, `${symbol}_INSIDE_TICKS`) ?? num(source, "QUOTE_INSIDE_TICKS") ?? 1;
   return { symbol, size: size ?? null, insideTicks, maxPosition: maxPosition ?? null };
 }
@@ -103,6 +114,11 @@ export const config = {
   jevModelId: env.JEV_MODEL_ID ?? "jev-latest",
   jevUsdPerMTok: 0.042,
   port: Number(env.PORT ?? "3000"),
+  leverage: resolveLeverage(env),
+  modelTimeoutMs: Math.max(100, Number(env.MODEL_TIMEOUT_MS ?? "5000")),
+  equitySnapshotMs: Math.max(1000, Number(env.EQUITY_SNAPSHOT_MS ?? "30000")),
+  paperDb: env.PAPER_DB && env.PAPER_DB !== "" ? env.PAPER_DB : "data/paper.sqlite",
+  resetPaper: env.RESET_PAPER === "true",
   historySize: 1000,
   restUrl: restBase(env.BYBIT_TESTNET === "true", env.BYBIT_REST_URL),
   publicWs: publicWsUrl(env.BYBIT_TESTNET === "true", resolveCategory(env.BYBIT_CATEGORY), env.BYBIT_PUBLIC_WS_URL),

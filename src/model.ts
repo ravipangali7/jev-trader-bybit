@@ -122,3 +122,28 @@ export class MockModel implements Model {
 }
 
 export const createModel = (): Model => (config.model === "jev" ? new JevModel() : new MockModel());
+
+/**
+ * Bound a model call. On timeout the caller treats the tick as late and quotes nothing.
+ * A late rejection from the original call is swallowed so the process stays up.
+ */
+export async function decideWithTimeout(model: Model, state: TradeState, ms: number): Promise<Decision> {
+  let settled = false;
+  const pending = model.decide(state).then(
+    (d) => d,
+    (err: unknown) => {
+      if (settled) return new Promise<Decision>(() => undefined as never);
+      throw err;
+    },
+  );
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`model timeout after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([pending, timeout]);
+  } finally {
+    settled = true;
+    clearTimeout(timer!);
+  }
+}

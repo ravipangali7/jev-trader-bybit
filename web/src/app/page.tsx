@@ -4,6 +4,7 @@ import DecisionPanel from "@/components/DecisionPanel/DecisionPanel";
 import Feed from "@/components/Feed/Feed";
 import FlowChart from "@/components/FlowChart/FlowChart";
 import Header from "@/components/Header/Header";
+import Performance from "@/components/Performance/Performance";
 import StatsRow from "@/components/StatsRow/StatsRow";
 import { useFeed } from "@/lib/useFeed";
 import styles from "./page.module.css";
@@ -47,6 +48,7 @@ export default function Page() {
           );
         })}
       </div>
+      <Performance api={API_URL} symbols={symbols} />
       <p className={styles.footer}>Experimental. Paper trading until DRY_RUN is false. Not financial advice.</p>
     </div>
   );

@@ -111,10 +111,8 @@ svg {
 }
 
 /* ---- the card: the design's 1400px white slab, centered on the warm page ----
-   Desktop (>= 900px): the card is exactly the viewport minus its 16px margins
-   and is a flex column, so header + stats take their natural height and the
-   main row absorbs the rest. Nothing can overflow -> no page scrollbar.
-   Below 900px the card is auto-height and the page scrolls normally. */
+   The live books keep a fixed height. The paper performance section sits
+   below them, so the page scrolls. */
 .card {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -130,14 +128,13 @@ svg {
 }
 
 @media (min-width: 900px) {
-  /* the card already fills the viewport; never let the document scroll */
   body {
-    overflow: hidden;
+    overflow: auto;
   }
 
   .card {
-    /* 16px margin top + 16px bottom; border-box keeps the 1px borders inside */
-    height: calc(100vh - 32px);
+    height: auto;
+    min-height: calc(100vh - 32px);
   }
 }
 

@@ -1,9 +1,10 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { closingSize, closeNet, equityUsd, type AccountFill, type ReplayState } from "./account.ts";
 import type { SymbolSpec } from "./config.ts";
-import type { Model, TradeState } from "./model.ts";
+import { decideWithTimeout, type Model, type TradeState } from "./model.ts";
 import { applyFill, entryPrice, flat, sessionPnl, shouldKill, unrealizedUsd, type Inventory } from "./pnl.ts";
-import { formatStep, orderQty, quotePrice } from "./bybit/num.ts";
+import { alignQtyDown, formatStep, orderQty, quotePrice } from "./bybit/num.ts";
 import { feeToUsd } from "./bybit/fees.ts";
 import { isBalanceError, isMissingOrder, type BybitVenue, type LiveExecution, type LiveOrderUpdate } from "./bybit/venue.ts";
 import type { BookView, Fill, Instrument, Print, Quote, Side, TickEvent, Totals, TradeSummary } from "./types.ts";
@@ -35,6 +36,14 @@ export interface TraderOpts {
   isKilled: () => boolean;
   onEvent: (e: TickEvent, timing?: { readMs: number; loopMs: number }) => void;
   onFill: (tick: number, fill: Fill) => void;
+  /** Persist a paper or live fill. Omitted in unit tests. */
+  onAccountFill?: (fill: AccountFill) => void;
+  /** Paper starting balance for this symbol. Defaults to bankrollUsd. */
+  startUsd?: number;
+  /** Exposure cap is equity times this. Default 1. */
+  leverage?: number;
+  /** Model calls slower than this become a late tick. */
+  modelTimeoutMs?: number;
   /** Live only. False when the wallet cannot fund this order. Unknown balances should return true. */
   funds?: (side: Side, qty: number, price: number) => boolean;
   logFile?: string;
@@ -80,10 +89,18 @@ export class SymbolTrader {
   private seenExec = new Set<string>();
   private link = 0;
   private sizeNote = false;
+  private roundTrips = 0;
+  private wins = 0;
+  private readonly startUsd: number;
+  private readonly leverage: number;
+  private readonly modelTimeoutMs: number;
   instrument: Instrument;
 
   constructor(private opts: TraderOpts) {
     this.instrument = opts.instrument;
+    this.startUsd = opts.startUsd ?? opts.bankrollUsd;
+    this.leverage = opts.leverage ?? 1;
+    this.modelTimeoutMs = opts.modelTimeoutMs ?? 5_000;
     if (opts.logFile) mkdirSync(dirname(opts.logFile), { recursive: true });
   }
 
@@ -99,6 +116,33 @@ export class SymbolTrader {
   seed(qty: number, entry: number) {
     this.position = qty ? { qty, costUsd: qty * entry } : flat();
     this.baselineUnrealized = null;
+  }
+
+  /** Reload a paper account after a restart. Baseline is zero so the kill switch still sees the whole run. */
+  restore(state: ReplayState) {
+    this.position = state.qty ? { qty: state.qty, costUsd: state.costUsd } : flat();
+    this.totals.realizedUsd = state.realizedUsd;
+    this.totals.feesUsd = state.feesUsd;
+    this.totals.fills = state.fills;
+    this.roundTrips = state.roundTrips;
+    this.wins = state.wins;
+    for (const id of state.execIds) this.seenExec.add(id);
+    this.baselineUnrealized = 0;
+  }
+
+  accountView(mid?: number) {
+    const m = mid && mid > 0 ? mid : this.lastBook?.mid ?? 0;
+    const unreal = m > 0 ? unrealizedUsd(this.position, m) : 0;
+    return {
+      startUsd: this.startUsd,
+      fills: this.totals.fills,
+      roundTrips: this.roundTrips,
+      wins: this.wins,
+      realizedUsd: this.totals.realizedUsd,
+      unrealizedUsd: unreal,
+      feesUsd: this.totals.feesUsd,
+      positionQty: this.position.qty,
+    };
   }
 
   async onTick() {
@@ -118,6 +162,7 @@ export class SymbolTrader {
     if (!book) return;
     this.busy = true;
     const t0 = performance.now();
+    let emitted = false;
     try {
       if (!this.opts.venue) this.harvestSims();
       this.maybeKill(book.mid);
@@ -126,7 +171,7 @@ export class SymbolTrader {
       this.mids.push(book.mid);
       if (this.mids.length > 400) this.mids.shift();
 
-      const decision = await this.opts.model.decide(this.buildState(tick, book));
+      const decision = await decideWithTimeout(this.opts.model, this.buildState(tick, book), this.modelTimeoutMs);
       if (this.opts.isKilled()) return;
       const wanted: Side = decision.action === "sell" ? "sell" : "buy";
       const other: Side = wanted === "buy" ? "sell" : "buy";
@@ -144,9 +189,11 @@ export class SymbolTrader {
         if (quote?.status === "rejected") this.totals.rejected++;
       }
       this.emit(tick, book, decision, quote, false, { readMs: 0, loopMs: Math.round(performance.now() - t0) });
+      emitted = true;
       this.maybeKill(book.mid);
     } catch (e) {
       console.error(`${this.symbol} tick ${tick}:`, (e as Error).message);
+      if (!emitted && this.lastBook) this.emit(tick, this.lastBook, null, null, true);
     } finally {
       this.busy = false;
       const late = this.pendingLate.splice(0);
@@ -191,34 +238,46 @@ export class SymbolTrader {
   /** Set just before the first tick so backfill does not replay older account history. */
   startedAt = 0;
 
+  /** Equity times leverage, optionally tightened by an explicit base-coin ceiling. */
+  private maxAbsQty(price: number): number {
+    const notional = Math.max(0, this.equityAt(price)) * this.leverage;
+    let qty = price > 0 ? notional / price : 0;
+    const cap = this.opts.spec.maxPosition;
+    if (cap !== null) qty = Math.min(qty, cap);
+    return Math.max(0, qty);
+  }
+
   private sized(price: number): number {
     const inst = this.instrument;
     const wanted = this.opts.spec.size ?? inst.minOrderQty;
-    const q = orderQty(wanted, price, inst.qtyStep, inst.minOrderQty, inst.maxOrderQty, inst.minNotional);
+    let q = orderQty(wanted, price, inst.qtyStep, inst.minOrderQty, inst.maxOrderQty, inst.minNotional);
     if (!this.sizeNote && this.opts.spec.size !== null && q !== alignNote(this.opts.spec.size, inst.qtyStep)) {
       console.log(`${this.symbol} order size ${this.opts.spec.size} adjusted to ${q} (step ${inst.qtyStep}, min ${inst.minOrderQty}, min notional ${inst.minNotional})`);
       this.sizeNote = true;
     }
-    const cap = this.cap();
-    if (q > cap) {
-      if (!this.sizeNote) console.warn(`${this.symbol} order size ${q} is above the position cap ${cap}, not quoting`);
+    const room = this.maxAbsQty(price);
+    if (q > room + 1e-9) {
+      const shrunk = alignQtyDown(room, inst.qtyStep);
+      const min = orderQty(0, price, inst.qtyStep, inst.minOrderQty, inst.maxOrderQty, inst.minNotional);
+      const over = Math.abs(this.position.qty) > room + 1e-9;
+      if (shrunk + 1e-9 < min) {
+        if (over) return q;
+        if (!this.sizeNote) console.warn(`${this.symbol} order ${q} is above equity x ${this.leverage} (${room.toFixed(4)} base), not quoting`);
+        this.sizeNote = true;
+        return 0;
+      }
+      if (!this.sizeNote) console.log(`${this.symbol} order size ${q} reduced to ${shrunk} to stay within equity x ${this.leverage}`);
       this.sizeNote = true;
-      return 0;
+      q = shrunk;
     }
     return q;
-  }
-
-  private cap(): number {
-    const spec = this.opts.spec;
-    if (spec.maxPosition !== null) return spec.maxPosition;
-    const size = spec.size ?? this.instrument.minOrderQty;
-    return size * 10;
   }
 
   /** The new order replaces the old one, so only the new size plus the position counts. */
   private allowed(side: Side, size: number, price: number): boolean {
     const next = side === "buy" ? this.position.qty + size : this.position.qty - size;
-    if (Math.abs(next) > this.cap() + 1e-9) return false;
+    const reducing = Math.abs(next) + 1e-9 < Math.abs(this.position.qty);
+    if (!reducing && Math.abs(next) > this.maxAbsQty(price) + 1e-9) return false;
     if (this.opts.funds && !this.opts.funds(side, size, price)) return false;
     return true;
   }
@@ -289,9 +348,32 @@ export class SymbolTrader {
   }
 
   private noteFill(fill: Fill) {
-    this.totals.realizedUsd += applyFill(this.position, fill.side, fill.size, fill.price);
+    const before = this.position.qty;
+    const realized = applyFill(this.position, fill.side, fill.size, fill.price);
+    this.totals.realizedUsd += realized;
     this.totals.feesUsd += fill.feeUsd;
     this.totals.fills++;
+    const closed = closingSize(before, fill.side, fill.size);
+    if (closed > 0) {
+      this.roundTrips++;
+      if (closeNet(realized, fill.feeUsd, closed, fill.size) > 0) this.wins++;
+    }
+    const mid = this.lastBook?.mid ?? fill.price;
+    this.writeTotals(mid);
+    this.opts.onAccountFill?.({
+      symbol: this.symbol,
+      ts: Date.now(),
+      side: fill.side,
+      size: fill.size,
+      price: fill.price,
+      feeUsd: fill.feeUsd,
+      realizedUsd: realized,
+      positionQty: this.position.qty,
+      equityUsd: this.equityAt(mid),
+      simulated: fill.simulated,
+      orderId: fill.orderId,
+      execId: fill.execId,
+    });
     const tick = this.history.at(-1)?.tick ?? this.totals.ticks;
     const e = this.history.find((h) => h.tick === tick);
     if (e) e.fill = e.fill && e.fill.side === fill.side ? combineFill(e.fill, fill) : fill;
@@ -323,7 +405,12 @@ export class SymbolTrader {
     if (this.baselineUnrealized === null) this.baselineUnrealized = unreal;
     const t = this.totals;
     t.pnlUsd = sessionPnl(t.realizedUsd, unreal, this.baselineUnrealized, t.feesUsd);
-    t.pnlPct = this.opts.bankrollUsd ? (t.pnlUsd / this.opts.bankrollUsd) * 100 : 0;
+    t.pnlPct = this.startUsd ? (t.pnlUsd / this.startUsd) * 100 : 0;
+  }
+
+  private equityAt(mid: number): number {
+    const unreal = mid > 0 ? unrealizedUsd(this.position, mid) : 0;
+    return equityUsd(this.startUsd, this.totals.realizedUsd, unreal, this.totals.feesUsd);
   }
 
   private buildState(tick: number, book: BookView): TradeState {

@@ -1,5 +1,21 @@
+import type { Metrics } from "./account.ts";
+import type { AccountFill } from "./account.ts";
+import type { EquityRow } from "./store.ts";
 import { config } from "./config.ts";
 import type { Fill, Meta, Quote, TickEvent } from "./types.ts";
+
+export interface SummaryBody {
+  startedAt: number;
+  runMs: number;
+  symbols: Record<string, Metrics>;
+  combined: Metrics;
+}
+
+export interface PerformanceApi {
+  summary: () => SummaryBody;
+  trades: (opts: { symbol?: string; limit: number; offset: number }) => { trades: AccountFill[]; total: number };
+  equity: () => Record<string, EquityRow[]>;
+}
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
 const json = (body: unknown, status = 200) =>
@@ -9,7 +25,7 @@ const json = (body: unknown, status = 200) =>
  * GET / snapshot. GET /history per-symbol events. GET /events SSE
  * (`snapshot`, `block`, `quote`, `fill`, `status`, `ping`).
  */
-export function startServer(meta: () => Meta, history: () => Record<string, TickEvent[]>, port = config.port) {
+export function startServer(meta: () => Meta, history: () => Record<string, TickEvent[]>, port = config.port, perf?: PerformanceApi) {
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const enc = new TextEncoder();
   const send = (c: ReadableStreamDefaultController<Uint8Array>, type: string, data: unknown) => {
@@ -35,6 +51,18 @@ export function startServer(meta: () => Meta, history: () => Record<string, Tick
       const url = new URL(req.url);
       if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
       if (url.pathname === "/") return json(snapshot());
+      if (url.pathname === "/summary" && perf) return json(perf.summary());
+      if (url.pathname === "/trades" && perf) {
+        const symbol = url.searchParams.get("symbol")?.toUpperCase() || undefined;
+        const limit = Number(url.searchParams.get("limit") ?? "50");
+        const offset = Number(url.searchParams.get("offset") ?? "0");
+        return json(perf.trades({
+          symbol,
+          limit: Number.isFinite(limit) ? limit : 50,
+          offset: Number.isFinite(offset) ? offset : 0,
+        }));
+      }
+      if (url.pathname === "/equity" && perf) return json(perf.equity());
       if (url.pathname === "/history") return json(history());
       if (url.pathname.startsWith("/history/")) {
         const symbol = decodeURIComponent(url.pathname.slice("/history/".length)).toUpperCase();

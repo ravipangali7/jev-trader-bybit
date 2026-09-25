@@ -1,4 +1,5 @@
-import { config, specsFor } from "./config.ts";
+import { buildMetrics, replayFills, type MetricInput } from "./account.ts";
+import { config, specsFor, symbolStartUsd } from "./config.ts";
 import { scheduleFees } from "./bybit/fees.ts";
 import { inferInstrument, parseInstrument } from "./bybit/instrument.ts";
 import { PublicFeed, waitForBooks } from "./bybit/public.ts";
@@ -6,6 +7,7 @@ import { BybitRest } from "./bybit/rest.ts";
 import { BybitVenue } from "./bybit/venue.ts";
 import { createModel } from "./model.ts";
 import { startServer } from "./server.ts";
+import { PaperStore, type EquityRow } from "./store.ts";
 import { SymbolTrader } from "./trader.ts";
 import type { BookView, Fill, Instrument, Meta, Print, Side, TickEvent } from "./types.ts";
 
@@ -49,11 +51,108 @@ function meta(): Meta {
   };
 }
 
-const startedAt = Date.now();
+const store = new PaperStore(config.paperDb);
+if (config.resetPaper) {
+  console.warn(`RESET_PAPER=true, wiping ${config.paperDb}`);
+  store.reset();
+}
+const startedAt = store.startedAt();
+const starts = new Map(config.symbols.map((s) => [s, symbolStartUsd(process.env, s)]));
+
+function emptyInput(startUsd: number): MetricInput {
+  return {
+    startUsd, fills: 0, roundTrips: 0, wins: 0, realizedUsd: 0, unrealizedUsd: 0, feesUsd: 0, positionQty: 0, peakEquityUsd: startUsd,
+  };
+}
+
+function metricsFor(symbol: string) {
+  const trader = traders.get(symbol);
+  const start = starts.get(symbol) ?? 100;
+  const mid = data.view(symbol)?.mid ?? 0;
+  const view = trader?.accountView(mid) ?? emptyInput(start);
+  const equity = start + view.realizedUsd + view.unrealizedUsd - view.feesUsd;
+  const peak = Math.max(store.peak(symbol), store.maxEquity(symbol), equity, start);
+  store.setPeak(symbol, peak);
+  return buildMetrics({ ...view, startUsd: start, peakEquityUsd: peak });
+}
+
+function combinedMetrics() {
+  const parts = config.symbols.map((s) => metricsFor(s));
+  const sum = (pick: (m: MetricInput) => number) => parts.reduce((n, m) => n + pick(m), 0);
+  const equity = sum((m) => m.startUsd + m.realizedUsd + m.unrealizedUsd - m.feesUsd);
+  const start = sum((m) => m.startUsd);
+  const peak = Math.max(store.peak("COMBINED"), store.maxEquity("COMBINED"), equity, start);
+  store.setPeak("COMBINED", peak);
+  return buildMetrics({
+    startUsd: start,
+    fills: sum((m) => m.fills),
+    roundTrips: sum((m) => m.roundTrips),
+    wins: sum((m) => m.wins),
+    realizedUsd: sum((m) => m.realizedUsd),
+    unrealizedUsd: sum((m) => m.unrealizedUsd),
+    feesUsd: sum((m) => m.feesUsd),
+    positionQty: 0,
+    peakEquityUsd: peak,
+  });
+}
+
+function equityRow(symbol: string, input: MetricInput, ts: number): EquityRow {
+  const m = buildMetrics(input);
+  return {
+    symbol, ts,
+    equityUsd: m.equityUsd,
+    realizedUsd: m.realizedUsd,
+    unrealizedUsd: m.unrealizedUsd,
+    feesUsd: m.feesUsd,
+    positionQty: m.positionQty,
+    pnlUsd: m.pnlUsd,
+  };
+}
+
+function snapshotEquity(ts = Date.now()) {
+  let start = 0;
+  let realized = 0;
+  let unreal = 0;
+  let fees = 0;
+  let pnl = 0;
+  let equity = 0;
+  let ready = 0;
+  for (const symbol of config.symbols) {
+    const trader = traders.get(symbol);
+    if (!trader) continue;
+    const mid = data.view(symbol)?.mid ?? 0;
+    if (!(mid > 0) && trader.accountView().fills === 0) continue;
+    const view = trader.accountView(mid);
+    const row = equityRow(symbol, { ...view, peakEquityUsd: store.peak(symbol) }, ts);
+    store.insertEquity(row);
+    store.setPeak(symbol, Math.max(store.peak(symbol), row.equityUsd));
+    start += view.startUsd;
+    realized += view.realizedUsd;
+    unreal += view.unrealizedUsd;
+    fees += view.feesUsd;
+    pnl += row.pnlUsd;
+    equity += row.equityUsd;
+    ready++;
+  }
+  if (ready === 0) return;
+  store.insertEquity({
+    symbol: "COMBINED", ts, equityUsd: equity, realizedUsd: realized, unrealizedUsd: unreal, feesUsd: fees, positionQty: 0, pnlUsd: pnl,
+  });
+  store.setPeak("COMBINED", Math.max(store.peak("COMBINED"), equity, start));
+}
+
 const server = startServer(meta, () => {
   const out: Record<string, TickEvent[]> = {};
   for (const s of config.symbols) out[s] = traders.get(s)?.history ?? [];
   return out;
+}, config.port, {
+  summary: () => ({ startedAt, runMs: Date.now() - startedAt, symbols: Object.fromEntries(config.symbols.map((s) => [s, metricsFor(s)])), combined: combinedMetrics() }),
+  trades: (opts) => store.trades(opts),
+  equity: () => {
+    const out: Record<string, EquityRow[]> = { COMBINED: store.equitySeries("COMBINED") };
+    for (const s of config.symbols) out[s] = store.equitySeries(s);
+    return out;
+  },
 });
 
 function kill(reason: string) {
@@ -138,7 +237,7 @@ function infer(symbol: string): Instrument | null {
 
 async function main() {
   const where = config.testnet ? "testnet" : "mainnet";
-  console.log(`jev-trader | Bybit ${config.category} ${where} | ${config.symbols.join(" ")} | ${config.dryRun ? "DRY RUN" : "LIVE"} | model ${model.name} | loop ${config.loopMs}ms | :${server.port}`);
+  console.log(`jev-trader | Bybit ${config.category} ${where} | ${config.symbols.join(" ")} | ${config.dryRun ? "DRY RUN" : "LIVE"} | model ${model.name} | loop ${config.loopMs}ms | :${server.port} | paper ${config.paperDb}`);
   console.log(config.dryRunReason);
   if (!config.dryRun && !config.testnet) console.log("LIVE mainnet orders are enabled");
   if (!config.dryRun && config.testnet) console.log("LIVE testnet orders are enabled");
@@ -221,9 +320,21 @@ async function main() {
       isKilled: () => risk.killed,
       onEvent: logTick,
       onFill: (tick, fill) => onFill(spec.symbol, tick, fill),
+      onAccountFill: (row) => {
+        store.insertTrade(row);
+        store.setPeak(row.symbol, row.equityUsd);
+      },
+      startUsd: starts.get(spec.symbol) ?? 100,
+      leverage: config.leverage,
+      modelTimeoutMs: config.modelTimeoutMs,
       funds: config.dryRun ? undefined : (side, qty, price) => fundsOk(spec.symbol, side, qty, price),
       logFile: "data/events.jsonl",
     });
+    const prior = replayFills(store.allTrades(spec.symbol));
+    if (prior.fills > 0) {
+      trader.restore(prior);
+      console.log(`${spec.symbol} restored ${prior.fills} fills, position ${prior.qty}, realized $${prior.realizedUsd.toFixed(4)}, fees $${prior.feesUsd.toFixed(4)}`);
+    }
     traders.set(spec.symbol, trader);
   }
 
@@ -252,8 +363,8 @@ async function main() {
     }
   }
 
-  const startMs = Date.now();
-  for (const t of traders.values()) t.startedAt = startMs;
+  for (const t of traders.values()) t.startedAt = startedAt;
+  snapshotEquity();
 
   const stagger = Math.floor(config.loopMs / Math.max(1, config.symbols.length));
   config.symbols.forEach((symbol, i) => {
@@ -266,6 +377,13 @@ async function main() {
   });
 
   setInterval(() => server.broadcastStatus(), 5_000);
+  setInterval(() => {
+    try {
+      snapshotEquity();
+    } catch (e) {
+      console.error("equity snapshot:", (e as Error).message);
+    }
+  }, config.equitySnapshotMs);
 
   if (config.dryRun) {
     setInterval(() => {
@@ -318,11 +436,21 @@ async function shutdown(sig: string) {
   risk.killed = true;
   console.log(`${sig}: cancelling open orders`);
   feed.stop();
+  try {
+    snapshotEquity();
+  } catch (e) {
+    console.error("equity snapshot:", (e as Error).message);
+  }
   if (venue) await venue.cancelAllSymbols(config.symbols);
   venue?.stop();
   server.stop();
+  store.close();
   process.exit(0);
 }
+
+process.on("unhandledRejection", (err) => {
+  console.error("unhandled rejection:", err instanceof Error ? err.message : err);
+});
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
